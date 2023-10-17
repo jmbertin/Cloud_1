@@ -1,0 +1,132 @@
+---
+- hosts: all
+  vars_files:
+    - secret.yml
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: Install aptitude using apt
+      apt: name=aptitude state=latest update_cache=yes force_apt_get=yes
+
+    - name: Install / update required system packages
+      apt:
+        name: "{{ item }}"
+        state: latest
+        update_cache: yes
+      loop:
+        - 'apt-transport-https'
+        - 'ca-certificates'
+        - 'curl'
+        - 'software-properties-common'
+        - 'openssl'
+        - 'python3-pip'
+
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu bionic stable
+        state: present
+
+    - name: Update apt and install docker-ce
+      apt: update_cache=yes name=docker-ce state=latest
+
+    - name: Ensure docker service is running
+      service: name=docker state=started
+
+    - name: Create necessary directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode | default('0755') }}"
+        owner: root
+        group: root
+      with_items:
+        - { path: '/docker', mode: '0755' }
+        - { path: '/docker/nginx' }
+        - { path: '/docker/ssl' }
+        - { path: '/docker/wordpress/html' }
+
+    - name: Copy Docker files to the server
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      with_items:
+        - { src: 'wordpress/Dockerfile', dest: '/docker/wordpress/Dockerfile', mode: '0644' }
+        - { src: 'docker-compose.yml', dest: '/docker/docker-compose.yml', mode: '0644' }
+
+    - name: Generate .env file
+      ansible.builtin.template:
+        src: ./env.j2
+        dest: "/docker/.env"
+      vars:
+        wordpress_http_port: "{{ WORDPRESS_HTTP_PORT }}"
+        phpmyadmin_http_port: "{{ PHPMYADMIN_HTTP_PORT }}"
+        wordpress_admin: "{{ WORDPRESS_ADMIN }}"
+        wordpress_mail: "{{ WORDPRESS_MAIL }}"
+        wordpress: "{{ WORDPRESS }}"
+
+    - name: Generate NGINX conf file
+      template:
+        src: nginx/nginx.conf.j2
+        dest: /docker/nginx/default.conf
+
+    - name: Generate OpenSSL private key
+      command: openssl genrsa -out /docker/ssl/nginx.key 2048
+      args:
+        creates: /docker/ssl/nginx.key
+
+    - name: Generate OpenSSL certificate
+      command: openssl req -new -x509 -key /docker/ssl/nginx.key -out /docker/ssl/nginx.crt -days 365 -subj "/C=US/ST=California/L=San Francisco/O=Docker/CN=*"
+      args:
+        creates: /docker/ssl/nginx.crt
+
+    - name: Deploy with docker-compose
+      command: sudo docker compose -f /docker/docker-compose.yml up -d
+
+    - name: Wait for database to be ready
+      command: sudo docker exec docker-db-1 bash -c "mysql -u{{ WORDPRESS }} -p{{ WORDPRESS }} -e 'SELECT 1' --silent"
+      register: result
+      until: result.rc == 0
+      retries: 20
+      delay: 30
+
+    - name: Wait for MySQL connection to be ready
+      command: >
+        sudo docker exec docker-db-1 bash -c "mysql -u{{ WORDPRESS }} -p{{ WORDPRESS }} -e 'SELECT 1' --silent"
+      register: result
+      until: result.rc == 0
+      retries: 20
+      delay: 30
+
+    - name: Check if WordPress is already installed
+      command: sudo docker exec docker-wordpress-1 sh -c "wp core is-installed --allow-root"
+      register: wp_is_installed
+      ignore_errors: yes
+      failed_when: "'Error' in wp_is_installed.stderr and 'Undefined array key \"HTTP_HOST\"' not in wp_is_installed.stderr"
+
+    - name: Stop execution if WordPress is already installed
+      meta: end_play
+      when: wp_is_installed.rc == 0
+
+    - name: Download and install the latest version of WordPress using WP-CLI
+      command: 'sudo docker exec docker-wordpress-1 wp core download --path=/var/www/html --allow-root'
+
+    - name: Create WordPress configuration file
+      command: >
+        sudo docker exec docker-wordpress-1 wp config create --allow-root
+        --dbname={{ vault_WORDPRESS }}
+        --dbuser={{ vault_WORDPRESS }}
+        --dbpass={{ vault_WORDPRESS }}
+        --dbhost=db:3306
+        --path=/var/www/html
+      register: wp_config_output
+
+    - name: Install WordPress using WP-CLI
+      command: sudo docker exec docker-wordpress-1 wp core install --allow-root --url="{{ ansible_host }}:{{ WORDPRESS_HTTP_PORT }}" --title="WP Cloud_1 42" --admin_user="{{ WORDPRESS_ADMIN }}" --admin_password="{{ ansible_ssh_pass }}" --admin_email="{{ WORDPRESS_MAIL }}"

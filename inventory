@@ -1,0 +1,13 @@
+[all:vars]
+ansible_user={{ vault_ansible_user }}
+ansible_ssh_pass={{ vault_ansible_ssh_pass }}
+ansible_become_pass={{ vault_ansible_become_pass }}
+WORDPRESS_ADMIN={{ vault_WORDPRESS_ADMIN }}
+WORDPRESS_MAIL={{ vault_WORDPRESS_MAIL }}
+WORDPRESS={{ vault_WORDPRESS }}
+WORDPRESS_DB_HOST={{ vault_WORDPRESS_DB_HOST }}
+PMA_HOST={{ vault_PMA_HOST }}
+
+[hosts]
+server1 WORDPRESS_HTTP_PORT=8081 PHPMYADMIN_HTTP_PORT=9091 ansible_host=XXX.XXX.XXX.XXX ansible_ssh_port=2201
+server2 WORDPRESS_HTTP_PORT=8082 PHPMYADMIN_HTTP_PORT=9092 ansible_host=XXX.XXX.XXX.XXX ansible_ssh_port=2202
